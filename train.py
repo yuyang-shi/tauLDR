@@ -93,7 +93,7 @@ def main(cfg, custom_name=None):
 
 
     while True:
-        for minibatch in tqdm(dataloader):
+        for minibatch in tqdm(dataloader, mininterval=10):
 
             training_step.step(state, minibatch, loss, writer)
 
@@ -126,6 +126,10 @@ if __name__ == "__main__":
     args, unknown_args = parser.parse_known_args()
     if args.config == 'cifar10':
         from config.train.cifar10 import get_config
+    elif args.config == 'conditional_mnist':
+        from config.train.conditional_mnist import get_config
+    elif args.config == 'conditional_imagenet':
+        from config.train.conditional_imagenet import get_config
     elif args.config == 'piano':
         from config.train.piano import get_config
     else:

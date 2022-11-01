@@ -106,6 +106,7 @@ def main(rank, world_size, cfg, unique_num, custom_name=None):
         shuffle=cfg.data.shuffle)
     dataloader = torch.utils.data.DataLoader(dataset,
         batch_size=cfg.data.batch_size//world_size,
+        num_workers=cfg.data.num_workers,
         sampler=dist_sampler)
 
     loss = losses_utils.get_loss(cfg)
@@ -149,7 +150,7 @@ def main(rank, world_size, cfg, unique_num, custom_name=None):
     exit_flag = False
 
     while True:
-        for minibatch in tqdm(dataloader):
+        for minibatch in tqdm(dataloader, mininterval=10):
 
             training_step.step(state, minibatch, loss, writer)
 
@@ -190,6 +191,10 @@ if __name__ == "__main__":
     args, unknown_args = parser.parse_known_args()
     if args.config == 'cifar10':
         from config.train.cifar10_distributed import get_config
+    elif args.config == 'conditional_mnist':
+        from config.train.conditional_mnist_distributed import get_config
+    elif args.config == 'conditional_imagenet':
+        from config.train.conditional_imagenet_distributed import get_config
     else:
         raise NotImplementedError
 

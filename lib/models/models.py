@@ -23,7 +23,6 @@ class ImageX0PredBase(nn.Module):
         num_scales = cfg.model.num_scales
         ch_mult = cfg.model.ch_mult
         input_channels = cfg.model.input_channels
-        output_channels = cfg.model.input_channels * cfg.data.S
         scale_count_to_put_attn = cfg.model.scale_count_to_put_attn
         data_min_max = cfg.model.data_min_max
         dropout = cfg.model.dropout
@@ -34,7 +33,7 @@ class ImageX0PredBase(nn.Module):
 
         tmp_net = networks.UNet(
                 ch, num_res_blocks, num_scales, ch_mult, input_channels,
-                output_channels, scale_count_to_put_attn, data_min_max,
+                scale_count_to_put_attn, data_min_max,
                 dropout, skip_rescale, do_time_embed, time_scale_factor,
                 time_embed_dim
         ).to(device)
@@ -97,6 +96,186 @@ class ImageX0PredBase(nn.Module):
             From https://arxiv.org/pdf/2107.03006.pdf
         """
         return a + torch.log1p(-torch.exp(b-a) + eps)
+
+
+class ConditionalImageX0PredBase(nn.Module):
+    def __init__(self, cfg, device, rank=None):
+        super().__init__()
+
+        self.fix_logistic = cfg.model.fix_logistic
+        ch = cfg.model.ch
+        num_res_blocks = cfg.model.num_res_blocks
+        num_scales = cfg.model.num_scales
+        ch_mult = cfg.model.ch_mult
+        input_channels = cfg.model.input_channels * 2
+        output_channels = input_channels
+        scale_count_to_put_attn = cfg.model.scale_count_to_put_attn
+        data_min_max = cfg.model.data_min_max
+        dropout = cfg.model.dropout
+        skip_rescale = cfg.model.skip_rescale
+        do_time_embed = True
+        time_scale_factor = cfg.model.time_scale_factor
+        time_embed_dim = cfg.model.time_embed_dim
+
+        tmp_net = networks.UNet(
+                ch, num_res_blocks, num_scales, ch_mult, input_channels,
+                scale_count_to_put_attn, data_min_max,
+                dropout, skip_rescale, do_time_embed, time_scale_factor,
+                time_embed_dim, output_channels=output_channels
+        ).to(device)
+        if cfg.distributed:
+            self.net = DDP(tmp_net, device_ids=[rank])
+        else:
+            self.net = tmp_net
+
+        self.S = cfg.data.S
+        self.data_shape = cfg.data.shape
+
+    def forward(self,
+        x: TensorType["B", "D"],
+        times: TensorType["B"]
+    ) -> TensorType["B", "D", "S"]:
+        """
+            Returns logits over state space for each pixel 
+        """
+        B, D = x.shape
+        C,H,W = self.data_shape
+        S = self.S
+        x = x.view(B, C*2, H, W)
+
+
+        net_out = self.net(x, times) # (B, 2*C, H, W)
+
+        # Truncated logistic output from https://arxiv.org/pdf/2107.03006.pdf
+
+
+        mu = net_out[:, 0:C, :, :].unsqueeze(-1)
+        log_scale = net_out[:, C:, :, :].unsqueeze(-1)
+
+        inv_scale = torch.exp(- (log_scale - 2))
+
+        bin_width = 2. / self.S
+        bin_centers = torch.linspace(start=-1. + bin_width/2,
+            end=1. - bin_width/2,
+            steps=self.S,
+            device=self.device).view(1, 1, 1, 1, self.S)
+
+        sig_in_left = (bin_centers - bin_width/2 - mu) * inv_scale
+        bin_left_logcdf = F.logsigmoid(sig_in_left)
+        sig_in_right = (bin_centers + bin_width/2 - mu) * inv_scale
+        bin_right_logcdf = F.logsigmoid(sig_in_right)
+
+        logits_1 = self._log_minus_exp(bin_right_logcdf, bin_left_logcdf)
+        logits_2 = self._log_minus_exp(-sig_in_left + bin_left_logcdf, -sig_in_right + bin_right_logcdf)
+        if self.fix_logistic:
+            logits = torch.min(logits_1, logits_2)
+        else:
+            logits = logits_1
+
+        logits = logits.view(B,D//2,S)
+
+        return torch.cat([torch.zeros_like(logits), logits], dim=1)
+
+    def _log_minus_exp(self, a, b, eps=1e-6):
+        """ 
+            Compute log (exp(a) - exp(b)) for (b<a)
+            From https://arxiv.org/pdf/2107.03006.pdf
+        """
+        return a + torch.log1p(-torch.exp(b-a) + eps)
+
+
+class ConditionalImageX0PredBaseWithLabel(nn.Module):
+    def __init__(self, cfg, device, rank=None):
+        super().__init__()
+
+        self.fix_logistic = cfg.model.fix_logistic
+        ch = cfg.model.ch
+        num_res_blocks = cfg.model.num_res_blocks
+        ch_mult = cfg.model.ch_mult
+        input_channels = cfg.model.input_channels * 2
+        output_channels = input_channels
+        attention_resolutions = cfg.model.attention_resolutions
+        data_min_max = cfg.model.data_min_max
+        dropout = cfg.model.dropout
+        use_checkpoint = cfg.model.use_checkpoint
+        # skip_rescale = cfg.model.skip_rescale
+        # do_time_embed = True
+        # time_scale_factor = cfg.model.time_scale_factor
+        # time_embed_dim = cfg.model.time_embed_dim
+
+        tmp_net = networks.SuperResModel(
+                input_channels, ch, output_channels, num_res_blocks, 
+                attention_resolutions, data_min_max, 
+                dropout=dropout, channel_mult=ch_mult, conv_resample=True,
+                num_classes=1000, use_checkpoint=use_checkpoint, num_heads=4, use_scale_shift_norm=True, resblock_updown=True
+        ).to(device)
+
+        if cfg.pretrained_ckpt is not None:
+            print("loading state from pretrained model: ", cfg.pretrained_ckpt)
+            loaded_state = torch.load(cfg.pretrained_ckpt)
+            tmp_net.load_state_dict(loaded_state)
+
+        if cfg.distributed:
+            self.net = DDP(tmp_net, device_ids=[rank])
+        else:
+            self.net = tmp_net
+
+        self.S = cfg.data.S
+        self.data_shape = cfg.data.shape
+
+    def forward(self,
+        x: TensorType["B", "D"],
+        times: TensorType["B"],
+        label
+    ) -> TensorType["B", "D", "S"]:
+        """
+            Returns logits over state space for each pixel 
+        """
+        B, D = x.shape
+        C,H,W = self.data_shape
+        S = self.S
+        x = x.view(B, C*2, H, W)
+
+
+        net_out = self.net(x, times, label) # (B, 2*C, H, W)
+
+        # Truncated logistic output from https://arxiv.org/pdf/2107.03006.pdf
+
+
+        mu = net_out[:, 0:C, :, :].unsqueeze(-1)
+        log_scale = net_out[:, C:, :, :].unsqueeze(-1)
+
+        inv_scale = torch.exp(- (log_scale - 2))
+
+        bin_width = 2. / self.S
+        bin_centers = torch.linspace(start=-1. + bin_width/2,
+            end=1. - bin_width/2,
+            steps=self.S,
+            device=self.device).view(1, 1, 1, 1, self.S)
+
+        sig_in_left = (bin_centers - bin_width/2 - mu) * inv_scale
+        bin_left_logcdf = F.logsigmoid(sig_in_left)
+        sig_in_right = (bin_centers + bin_width/2 - mu) * inv_scale
+        bin_right_logcdf = F.logsigmoid(sig_in_right)
+
+        logits_1 = self._log_minus_exp(bin_right_logcdf, bin_left_logcdf)
+        logits_2 = self._log_minus_exp(-sig_in_left + bin_left_logcdf, -sig_in_right + bin_right_logcdf)
+        if self.fix_logistic:
+            logits = torch.min(logits_1, logits_2)
+        else:
+            logits = logits_1
+
+        logits = logits.view(B,D//2,S)
+
+        return torch.cat([torch.zeros_like(logits), logits], dim=1)
+
+    def _log_minus_exp(self, a, b, eps=1e-6):
+        """ 
+            Compute log (exp(a) - exp(b)) for (b<a)
+            From https://arxiv.org/pdf/2107.03006.pdf
+        """
+        return a + torch.log1p(-torch.exp(b-a) + eps)
+
 
 class BirthDeathForwardBase():
     def __init__(self, cfg, device):
@@ -452,6 +631,26 @@ class GaussianTargetRateImageX0PredEMA(EMA, ImageX0PredBase, GaussianTargetRate)
 
         self.init_ema()
 
+
+# make sure EMA inherited first so it can override the state dict functions
+@model_utils.register_model
+class ConditionalGaussianTargetRateImageX0PredEMA(EMA, ConditionalImageX0PredBase, GaussianTargetRate):
+    def __init__(self, cfg, device, rank=None):
+        EMA.__init__(self, cfg)
+        ConditionalImageX0PredBase.__init__(self, cfg, device, rank)
+        GaussianTargetRate.__init__(self, cfg, device)
+
+        self.init_ema()
+
+# make sure EMA inherited first so it can override the state dict functions
+@model_utils.register_model
+class ConditionalGaussianTargetRateImageX0PredWithLabelEMA(EMA, ConditionalImageX0PredBaseWithLabel, GaussianTargetRate):
+    def __init__(self, cfg, device, rank=None):
+        EMA.__init__(self, cfg)
+        ConditionalImageX0PredBaseWithLabel.__init__(self, cfg, device, rank)
+        GaussianTargetRate.__init__(self, cfg, device)
+
+        self.init_ema()
 
 # make sure EMA inherited first so it can override the state dict functions
 @model_utils.register_model

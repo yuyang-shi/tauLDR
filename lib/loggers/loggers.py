@@ -1,5 +1,6 @@
 import ml_collections
 import torch
+import torchvision.utils as vutils
 import matplotlib.pyplot as plt
 import numpy as np
 import math
@@ -8,6 +9,8 @@ from pathlib import Path
 import os
 import time
 from tqdm import tqdm
+from PIL import Image
+import gc
 
 import lib.loggers.logger_utils as logger_utils
 import lib.sampling.sampling_utils as sampling_utils
@@ -36,28 +39,143 @@ def denoisingImages(*args, **kwargs):
         x = x.transpose(1,2)
         return x
 
-    fig, ax = plt.subplots(6, len(ts))
-    for img_idx in range(3):
-        for t_idx in range(len(ts)):
-            qt0 = model.transition(torch.tensor([ts[t_idx]], device=model.device)) # (B, S, S)
-            qt0_rows = qt0[
-                0, minibatch[img_idx, ...].flatten().long(), :
-            ]
-            x_t_cat = torch.distributions.categorical.Categorical(
-                qt0_rows
-            )
-            x_t = x_t_cat.sample().view(1, C*H*W)
+    with torch.no_grad():
+        fig, ax = plt.subplots(6, len(ts))
+        for img_idx in range(3):
+            for t_idx in range(len(ts)):
+                qt0 = model.transition(torch.tensor([ts[t_idx]], device=model.device)) # (B, S, S)
+                qt0_rows = qt0[
+                    0, minibatch[img_idx, ...].flatten().long(), :
+                ]
+                x_t_cat = torch.distributions.categorical.Categorical(
+                    qt0_rows
+                )
+                x_t = x_t_cat.sample().view(1, C*H*W)
 
-            x_0_logits = model(x_t, torch.tensor([ts[t_idx]], device=model.device)).view(B,C,H,W,S)
-            x_0_max_logits = torch.max(x_0_logits, dim=4)[1]
+                x_0_logits = model(x_t, torch.tensor([ts[t_idx]], device=model.device)).view(B,C,H,W,S)
+                x_0_max_logits = torch.max(x_0_logits, dim=4)[1]
 
-            ax[2*img_idx, t_idx].imshow(imgtrans(x_t.view(B,C,H,W)[0, ...].detach().cpu()))
-            ax[2*img_idx, t_idx].axis('off')
-            ax[2*img_idx+1, t_idx].imshow(imgtrans(x_0_max_logits[0, ...].detach().cpu()))
-            ax[2*img_idx+1, t_idx].axis('off')
+                ax[2*img_idx, t_idx].imshow(imgtrans(x_t.view(B,C,H,W)[0, ...].detach().cpu()))
+                ax[2*img_idx, t_idx].axis('off')
+                ax[2*img_idx+1, t_idx].imshow(imgtrans(x_0_max_logits[0, ...].detach().cpu()))
+                ax[2*img_idx+1, t_idx].axis('off')
 
-    writer.add_figure('denoisingImages', fig, state['n_iter'])
+        writer.add_figure('denoisingImages', fig, state['n_iter'])
 
+
+@logger_utils.register_logger
+def ConditionalDenoisingImages(*args, **kwargs):
+    state = kwargs['state']
+    cfg = kwargs['cfg']
+    writer = kwargs['writer']
+    minibatch = kwargs['minibatch']
+    dataset = kwargs['dataset']
+    model = state['model']
+
+    ts = [0.01, 0.3, 0.5, 0.6,0.7,0.8, 1.0]
+    C,H,W = cfg.data.shape
+    B = 1
+    S = cfg.data.S
+
+    def imgtrans(x):
+        # C,H,W -> H,W,C
+        x = x.transpose(0,1)
+        x = x.transpose(1,2)
+        return x
+
+    minibatch = minibatch.view(minibatch.shape[0], 2*C*H*W)
+    
+    with torch.no_grad():
+        fig, ax = plt.subplots(9, len(ts))
+        for img_idx in range(3):
+            for t_idx in range(len(ts)):
+                qt0 = model.transition(torch.tensor([ts[t_idx]], device=model.device)) # (B, S, S)
+                conditioner = minibatch[img_idx, 0:cfg.loss.condition_dim].view(1, cfg.loss.condition_dim)
+                data = minibatch[img_idx, cfg.loss.condition_dim:].view(1, C*H*W)
+                qt0_rows = qt0[
+                    0, data.flatten().long(), :
+                ]
+                x_t_cat = torch.distributions.categorical.Categorical(
+                    qt0_rows
+                )
+                x_t = x_t_cat.sample().view(1, C*H*W)
+
+                model_input = torch.concat((conditioner, x_t), dim=1)
+
+                full_x_0_logits = model(model_input, torch.tensor([ts[t_idx]], device=model.device)).view(1,2*C*H*W,S)
+                x_0_logits = full_x_0_logits[:, cfg.loss.condition_dim:, :].view(B,C,H,W,S)
+
+                x_0_max_logits = torch.max(x_0_logits, dim=4)[1]
+
+                ax[3*img_idx, t_idx].imshow(imgtrans(x_t.view(B,C,H,W)[0, ...].detach().cpu()))
+                ax[3*img_idx, t_idx].axis('off')
+                ax[3*img_idx+1, t_idx].imshow(imgtrans(x_0_max_logits[0, ...].detach().cpu()))
+                ax[3*img_idx+1, t_idx].axis('off')
+                ax[3*img_idx+2, t_idx].imshow(imgtrans(conditioner.view(B,C,H,W)[0, ...].detach().cpu()))
+                ax[3*img_idx+2, t_idx].axis('off')
+
+        writer.add_figure('ConditionalDenoisingImages', fig, state['n_iter'])
+
+
+@logger_utils.register_logger
+def ConditionalDenoisingImagesWithLabel(*args, **kwargs):
+    state = kwargs['state']
+    cfg = kwargs['cfg']
+    writer = kwargs['writer']
+    minibatch, labels = kwargs['minibatch']
+    dataset = kwargs['dataset']
+    model = state['model']
+
+    ts = [0.01, 0.3, 0.5, 0.6,0.7,0.8, 1.0]
+    C,H,W = cfg.data.shape
+    B = 1
+    S = cfg.data.S
+
+    def imgtrans(x):
+        # C,H,W -> H,W,C
+        x = x.transpose(0,1)
+        x = x.transpose(1,2)
+        return x
+
+    minibatch = minibatch.view(minibatch.shape[0], 2*C*H*W)
+    
+    with torch.no_grad():
+        num_rows = min(3, minibatch.shape[0])
+        all_results = []
+        # fig, ax = plt.subplots(num_rows*3, len(ts))
+        for img_idx in range(num_rows):
+            x_t_results = []
+            x_0_results = []
+            conditioner_results = []
+            for t_idx in range(len(ts)):
+                qt0 = model.transition(torch.tensor([ts[t_idx]], device=model.device)) # (B, S, S)
+                conditioner = minibatch[img_idx, 0:cfg.loss.condition_dim].view(1, cfg.loss.condition_dim)
+                data = minibatch[img_idx, cfg.loss.condition_dim:].view(1, C*H*W)
+                qt0_rows = qt0[
+                    0, data.flatten().long(), :
+                ]
+                x_t_cat = torch.distributions.categorical.Categorical(
+                    qt0_rows
+                )
+                x_t = x_t_cat.sample().view(1, C*H*W)
+
+                model_input = torch.concat((conditioner, x_t), dim=1)
+
+                full_x_0_logits = model(model_input, torch.tensor([ts[t_idx]], device=model.device), labels[img_idx].unsqueeze(0)).view(1,2*C*H*W,S)
+                x_0_logits = full_x_0_logits[:, cfg.loss.condition_dim:, :].view(B,C,H,W,S)
+
+                x_0_max_logits = torch.max(x_0_logits, dim=4)[1]
+
+                x_t_results.append(x_t.view(B,C,H,W)[0, ...].detach().cpu())
+                x_0_results.append(x_0_max_logits[0, ...].detach().cpu())
+                conditioner_results.append(conditioner.view(B,C,H,W)[0, ...].detach().cpu())
+            all_results = all_results + x_t_results + x_0_results + conditioner_results
+        fig = vutils.make_grid(all_results, nrow=len(ts), pad_value=255).clip(0, 255).byte()
+        writer.add_image('ConditionalDenoisingImages', fig, state['n_iter'])
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    
 
 @logger_utils.register_logger
 def ConditionalDenoisingNoteSeq(*args, **kwargs):
