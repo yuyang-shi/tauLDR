@@ -485,12 +485,12 @@ class ConditionalAux():
 
         neg_elbo = sig_mean + reg_mean
 
-
-        perm_x_logits = torch.permute(x_logits, (0,2,1))
-
-        nll = self.cross_ent(perm_x_logits, data.long())
-
-        return neg_elbo + self.nll_weight * nll
+        if self.nll_weight == 0:
+            return neg_elbo
+        else:
+            perm_x_logits = torch.permute(x_logits, (0,2,1))
+            nll = self.cross_ent(perm_x_logits, data.long())
+            return neg_elbo + self.nll_weight * nll
 
 
 @losses_utils.register_loss
@@ -732,9 +732,10 @@ class ConditionalAuxWithLabel():
 
         neg_elbo = sig_mean + reg_mean
 
+        if self.nll_weight == 0:
+            return neg_elbo
+        else:
+            perm_x_logits = torch.permute(x_logits, (0,2,1))
+            nll = self.cross_ent(perm_x_logits, data.long())
+            return neg_elbo + self.nll_weight * nll
 
-        perm_x_logits = torch.permute(x_logits, (0,2,1))
-
-        nll = self.cross_ent(perm_x_logits, data.long())
-
-        return neg_elbo + self.nll_weight * nll

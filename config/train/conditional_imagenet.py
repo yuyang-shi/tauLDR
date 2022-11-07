@@ -2,14 +2,14 @@ import ml_collections
 
 def get_config():
     save_directory = 'path/to/imagenet_output' 
-    datasets_folder = '/jmain02/home/J2AD008/wga35/yxs83-wga35/datasets/imagenet/2012'
+    datasets_folder = 'path/to/imagenet/2012'
 
     config = ml_collections.ConfigDict()
     config.experiment_name = 'conditional_imagenet'
     config.save_location = save_directory
 
     config.init_model_path = None
-    config.pretrained_ckpt = '/jmain02/home/J2AD008/wga35/yxs83-wga35/tauLDR/64_256_upsampler.pt'
+    config.pretrained_ckpt = 'path/to/64_256_upsampler.pt'
 
     config.device = 'cuda'
     config.distributed = False
@@ -34,7 +34,7 @@ def get_config():
     data.root = datasets_folder
     data.train = True
     data.S = 256
-    data.batch_size = 2 # use 128 if you have enough memory or use distributed
+    data.batch_size = 2
     data.shuffle = True
     data.shape = [3,256,256]
     data.random_flips = True
@@ -54,7 +54,6 @@ def get_config():
     model.attention_resolutions = [32,16,8]
     model.data_min_max = [0, 255]
     model.dropout = 0
-    model.use_checkpoint = True
     model.fix_logistic = False
 
     model.rate_sigma = 6.0

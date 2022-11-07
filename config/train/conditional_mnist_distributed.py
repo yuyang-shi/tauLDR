@@ -19,14 +19,14 @@ def get_config():
     config.loss = loss = ml_collections.ConfigDict()
     loss.name = 'ConditionalAux'
     loss.eps_ratio = 1e-9
-    loss.nll_weight = 0.001
+    loss.nll_weight = 0.  # 0.001
     loss.min_time = 0.01
     loss.condition_dim = 28*28
-    loss.one_forward_pass = True
+    loss.one_forward_pass = False
 
     config.training = training = ml_collections.ConfigDict()
     training.train_step_name = 'Standard'
-    training.n_iters = 2000000
+    training.n_iters = 1000000
     training.clip_grad = True
     training.warmup = 5000
 
